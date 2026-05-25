@@ -1,0 +1,72 @@
+name: release main
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          version="main-${GITHUB_SHA::7}"
+          date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ldflags="-s -w -X main.version=${version} -X main.commit=${GITHUB_SHA} -X main.date=${date}"
+
+          for arch in arm64 amd64; do
+            out_arch="$arch"
+            if [[ "$arch" == "amd64" ]]; then
+              out_arch="x86_64"
+            fi
+            CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -ldflags "$ldflags" -o "dist/schedule" .
+            tar -C dist -czf "dist/schedule_Darwin_${out_arch}.tar.gz" schedule
+            rm "dist/schedule"
+          done
+
+          (cd dist && shasum -a 256 schedule_Darwin_*.tar.gz > checksums.txt)
+
+      - name: Move latest tag
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          git tag -f latest "$GITHUB_SHA"
+          git push -f origin refs/tags/latest
+
+      - name: Publish latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest dist/* --clobber
+            gh release edit latest \
+              --title "Latest main build" \
+              --notes "Automated build from main at ${GITHUB_SHA}." \
+              --prerelease \
+              --latest
+          else
+            gh release create latest dist/* \
+              --title "Latest main build" \
+              --notes "Automated build from main at ${GITHUB_SHA}." \
+              --prerelease \
+              --latest \
+              --target "$GITHUB_SHA"
+          fi

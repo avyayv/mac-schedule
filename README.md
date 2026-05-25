@@ -1,22 +1,37 @@
 # mac-schedule
 
-A small Go CLI that makes macOS `launchd` user jobs easy to create, list, run, remove, and inspect.
+A small macOS CLI that makes `launchd` user jobs easy to create, list, run, remove, and inspect.
 
 It writes:
 
 - metadata: `~/.local/share/mac-schedule/jobs.json`
 - logs: `~/.local/state/mac-schedule/logs/`
-- plists: `~/Library/LaunchAgents/com.avyay.mac-schedule.<name>.plist`
+- plists: `~/Library/LaunchAgents/dev.mac-schedule.<name>.plist`
 
 ## Install
 
+Install the latest build from `main`:
+
 ```bash
-go install .
-# or
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/avyayv/mac-schedule/main/install.sh | sh
 ```
 
-The install script builds `schedule` into `~/.local/bin/schedule`.
+By default this installs `schedule` to `~/.local/bin`. Make sure that directory is on your `PATH`.
+
+Options:
+
+```bash
+# install somewhere else
+curl -fsSL https://raw.githubusercontent.com/avyayv/mac-schedule/main/install.sh | sh -s -- --dir /usr/local/bin
+
+# install a specific release tag
+curl -fsSL https://raw.githubusercontent.com/avyayv/mac-schedule/main/install.sh | sh -s -- --version latest
+
+# build from a local checkout instead of downloading a release
+./install.sh --from-source
+```
+
+Every push to `main` publishes fresh macOS arm64 and x86_64 artifacts to the moving `latest` release. Re-run the install command to update.
 
 ## Usage
 
@@ -29,6 +44,7 @@ schedule logs NAME [--err] [-n 100]
 schedule remove NAME
 schedule enable NAME
 schedule disable NAME
+schedule version
 ```
 
 ## Examples
@@ -36,7 +52,7 @@ schedule disable NAME
 Run every 3 hours from 9am through 9pm local time:
 
 ```bash
-schedule add twitter --every 3h --between 09:00-21:00 -- /Users/avyay/.pi/agent-personal/twitter-digest/hourly-twitter-imessage.sh
+schedule add digest --every 3h --between 09:00-21:00 -- ~/bin/digest.sh
 ```
 
 Run every day at 2:30am:
@@ -60,18 +76,18 @@ schedule list
 View launchd status and paths:
 
 ```bash
-schedule show twitter
+schedule show digest
 ```
 
 Start a job now:
 
 ```bash
-schedule run twitter
+schedule run digest
 ```
 
 Tail logs:
 
 ```bash
-schedule logs twitter
-schedule logs twitter --err -n 200
+schedule logs digest
+schedule logs digest --err -n 200
 ```

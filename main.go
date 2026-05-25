@@ -20,8 +20,14 @@ import (
 )
 
 const (
-	labelPrefix = "com.avyay.mac-schedule"
+	labelPrefix = "dev.mac-schedule"
 	appName     = "mac-schedule"
+)
+
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
 )
 
 type Job struct {
@@ -95,6 +101,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return cmdLogs(args[1:], stdout)
 	case "path":
 		return cmdPath(args[1:], stdout)
+	case "version", "--version", "-v":
+		printVersion(stdout)
+		return nil
 	case "help", "--help", "-h":
 		usage(stdout)
 		return nil
@@ -115,9 +124,10 @@ Usage:
   schedule remove NAME
   schedule enable NAME
   schedule disable NAME
+  schedule version
 
 Examples:
-  schedule add twitter --every 3h --between 09:00-21:00 -- /path/to/twitter.sh
+  schedule add digest --every 3h --between 09:00-21:00 -- ~/bin/digest.sh
   schedule add backup --at 02:30 -- ~/bin/backup
   schedule add heartbeat --every 15m -- curl -fsS https://example.com/ping
 
@@ -133,8 +143,16 @@ Add flags:
 Files:
   metadata: ~/.local/share/mac-schedule/jobs.json
   logs:     ~/.local/state/mac-schedule/logs
-  plists:   ~/Library/LaunchAgents/com.avyay.mac-schedule.<name>.plist
+  plists:   ~/Library/LaunchAgents/dev.mac-schedule.<name>.plist
 `)
+}
+
+func printVersion(w io.Writer) {
+	fmt.Fprintf(w, "schedule %s\n", version)
+	if commit != "unknown" || date != "unknown" {
+		fmt.Fprintf(w, "commit: %s\n", commit)
+		fmt.Fprintf(w, "built:  %s\n", date)
+	}
 }
 
 func cmdAdd(args []string, stdout io.Writer) error {
@@ -640,10 +658,15 @@ func pathsFor(name string) (appPaths, error) {
 
 func defaultEnv() map[string]string {
 	path := os.Getenv("PATH")
-	if path == "" {
-		path = "/opt/homebrew/bin:/usr/local/bin:/Users/avyay/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-	}
 	home, _ := os.UserHomeDir()
+	if path == "" {
+		parts := []string{"/opt/homebrew/bin", "/usr/local/bin"}
+		if home != "" {
+			parts = append(parts, filepath.Join(home, ".local", "bin"))
+		}
+		parts = append(parts, "/usr/bin", "/bin", "/usr/sbin", "/sbin")
+		path = strings.Join(parts, ":")
+	}
 	return map[string]string{
 		"HOME": home,
 		"PATH": path,
