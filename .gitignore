@@ -1,0 +1,12 @@
+# Build outputs
+schedule
+*.test
+*.out
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Local agent files
+.pi/
