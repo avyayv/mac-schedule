@@ -61,7 +61,8 @@ jobs:
               --title "Latest main build" \
               --notes "Automated build from main at ${GITHUB_SHA}." \
               --prerelease=false \
-              --latest
+              --latest \
+              --target "$GITHUB_SHA"
           else
             gh release create latest dist/* \
               --title "Latest main build" \
