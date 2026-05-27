@@ -67,6 +67,15 @@ Run every 15 minutes:
 schedule add heartbeat --every 15m -- curl -fsS https://example.com/ping
 ```
 
+Use five-field cron syntax:
+
+```bash
+schedule add weekdays --cron "0 9 * * MON-FRI" -- ~/bin/weekday-task
+schedule add hourly --cron "@hourly" -- ~/bin/hourly-task
+```
+
+Cron fields support `*`, lists, ranges, steps, month/weekday names, and common macros. Expressions that restrict both day-of-month and weekday are rejected because launchd cannot represent cron's OR semantics without duplicate runs.
+
 List jobs:
 
 ```bash

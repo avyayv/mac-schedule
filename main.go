@@ -46,16 +46,26 @@ type Job struct {
 }
 
 type Schedule struct {
-	Kind          string      `json:"kind"` // interval or calendar
-	EverySeconds  int         `json:"every_seconds,omitempty"`
-	Times         []TimeOfDay `json:"times,omitempty"`
-	Between       string      `json:"between,omitempty"`
-	EveryOriginal string      `json:"every_original,omitempty"`
+	Kind              string             `json:"kind"` // interval, calendar, or cron
+	EverySeconds      int                `json:"every_seconds,omitempty"`
+	Times             []TimeOfDay        `json:"times,omitempty"`
+	CalendarIntervals []CalendarInterval `json:"calendar_intervals,omitempty"`
+	Between           string             `json:"between,omitempty"`
+	EveryOriginal     string             `json:"every_original,omitempty"`
+	CronOriginal      string             `json:"cron_original,omitempty"`
 }
 
 type TimeOfDay struct {
 	Hour   int `json:"hour"`
 	Minute int `json:"minute"`
+}
+
+type CalendarInterval struct {
+	Minute  *int `json:"minute,omitempty"`
+	Hour    *int `json:"hour,omitempty"`
+	Day     *int `json:"day,omitempty"`
+	Month   *int `json:"month,omitempty"`
+	Weekday *int `json:"weekday,omitempty"`
 }
 
 type Store struct {
@@ -129,12 +139,14 @@ Usage:
 Examples:
   schedule add digest --every 3h --between 09:00-21:00 -- ~/bin/digest.sh
   schedule add backup --at 02:30 -- ~/bin/backup
+  schedule add weekdays --cron "0 9 * * MON-FRI" -- ~/bin/weekday-task
   schedule add heartbeat --every 15m -- curl -fsS https://example.com/ping
 
 Add flags:
   --every duration       interval such as 15m, 3h, 24h
   --between HH:MM-HH:MM  with --every, create calendar triggers in this local-time window
   --at HH:MM[,HH:MM]     exact local times each day
+  --cron "expr"          five-field cron schedule, such as "0 9 * * MON-FRI"
   --cwd path             working directory (default: current directory)
   --run-at-load          run when job is loaded
   --env KEY=VALUE        extra environment variable (repeatable)
@@ -158,12 +170,13 @@ func printVersion(w io.Writer) {
 func cmdAdd(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("add", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	var every, between, at, cwd string
+	var every, between, at, cronExpr, cwd string
 	var runAtLoad, replace bool
 	var envs arrayFlags
 	fs.StringVar(&every, "every", "", "interval duration")
 	fs.StringVar(&between, "between", "", "time window HH:MM-HH:MM")
 	fs.StringVar(&at, "at", "", "comma-separated HH:MM times")
+	fs.StringVar(&cronExpr, "cron", "", "five-field cron schedule")
 	fs.StringVar(&cwd, "cwd", "", "working directory")
 	fs.BoolVar(&runAtLoad, "run-at-load", false, "run at load")
 	fs.BoolVar(&replace, "replace", false, "replace existing job")
@@ -207,7 +220,7 @@ func cmdAdd(args []string, stdout io.Writer) error {
 		return err
 	}
 
-	sched, err := buildSchedule(every, between, at)
+	sched, err := buildSchedule(every, between, at, cronExpr)
 	if err != nil {
 		return err
 	}
@@ -420,12 +433,21 @@ func cmdPath(args []string, stdout io.Writer) error {
 	return nil
 }
 
-func buildSchedule(every, between, at string) (Schedule, error) {
-	if at != "" && every != "" {
-		return Schedule{}, usageError("use either --at or --every, not both")
+func buildSchedule(every, between, at, cronExpr string) (Schedule, error) {
+	set := 0
+	for _, value := range []string{every, at, cronExpr} {
+		if value != "" {
+			set++
+		}
 	}
-	if at == "" && every == "" {
-		return Schedule{}, usageError("schedule requires --at or --every")
+	if set != 1 {
+		return Schedule{}, usageError("schedule requires exactly one of --at, --every, or --cron")
+	}
+	if between != "" && every == "" {
+		return Schedule{}, usageError("--between requires --every")
+	}
+	if cronExpr != "" {
+		return parseCronSchedule(cronExpr)
 	}
 	if at != "" {
 		times, err := parseTimes(at)
@@ -459,6 +481,283 @@ func buildSchedule(every, between, at string) (Schedule, error) {
 		}
 	}
 	return Schedule{Kind: "calendar", Times: times, Between: between, EveryOriginal: every}, nil
+}
+
+func parseCronSchedule(expr string) (Schedule, error) {
+	original := strings.TrimSpace(expr)
+	expr = expandCronMacro(original)
+	fields := strings.Fields(expr)
+	if len(fields) != 5 {
+		return Schedule{}, usageError("invalid --cron %q; expected five fields: minute hour day month weekday", original)
+	}
+
+	minute, err := parseCronField(fields[0], 0, 59, nil, false)
+	if err != nil {
+		return Schedule{}, fmt.Errorf("cron minute: %w", err)
+	}
+	hour, err := parseCronField(fields[1], 0, 23, nil, false)
+	if err != nil {
+		return Schedule{}, fmt.Errorf("cron hour: %w", err)
+	}
+	day, err := parseCronField(fields[2], 1, 31, nil, false)
+	if err != nil {
+		return Schedule{}, fmt.Errorf("cron day: %w", err)
+	}
+	month, err := parseCronField(fields[3], 1, 12, monthNames(), false)
+	if err != nil {
+		return Schedule{}, fmt.Errorf("cron month: %w", err)
+	}
+	weekday, err := parseCronField(fields[4], 0, 7, weekdayNames(), true)
+	if err != nil {
+		return Schedule{}, fmt.Errorf("cron weekday: %w", err)
+	}
+
+	intervals, err := buildCronIntervals(minute, hour, day, month, weekday)
+	if err != nil {
+		return Schedule{}, err
+	}
+	return Schedule{Kind: "cron", CronOriginal: original, CalendarIntervals: intervals}, nil
+}
+
+func expandCronMacro(expr string) string {
+	switch strings.ToLower(expr) {
+	case "@hourly":
+		return "0 * * * *"
+	case "@daily", "@midnight":
+		return "0 0 * * *"
+	case "@weekly":
+		return "0 0 * * 0"
+	case "@monthly":
+		return "0 0 1 * *"
+	case "@yearly", "@annually":
+		return "0 0 1 1 *"
+	default:
+		return expr
+	}
+}
+
+type cronField struct {
+	all    bool
+	values []int
+}
+
+func parseCronField(expr string, minValue, maxValue int, names map[string]int, normalizeSunday bool) (cronField, error) {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return cronField{}, usageError("empty field")
+	}
+	if expr == "*" || expr == "?" {
+		return cronField{all: true}, nil
+	}
+
+	seen := map[int]bool{}
+	parts := strings.Split(expr, ",")
+	for _, part := range parts {
+		values, err := parseCronFieldPart(strings.TrimSpace(part), minValue, maxValue, names, normalizeSunday)
+		if err != nil {
+			return cronField{}, err
+		}
+		for _, value := range values {
+			seen[value] = true
+		}
+	}
+
+	allCount := maxValue - minValue + 1
+	if normalizeSunday {
+		allCount--
+	}
+	if len(seen) == allCount {
+		return cronField{all: true}, nil
+	}
+
+	values := make([]int, 0, len(seen))
+	for value := range seen {
+		values = append(values, value)
+	}
+	sort.Ints(values)
+	return cronField{values: values}, nil
+}
+
+func parseCronFieldPart(part string, minValue, maxValue int, names map[string]int, normalizeSunday bool) ([]int, error) {
+	if part == "" {
+		return nil, usageError("empty list item")
+	}
+	base, stepText, hasStep := strings.Cut(part, "/")
+	step := 1
+	if hasStep {
+		if strings.Contains(stepText, "/") || stepText == "" {
+			return nil, usageError("invalid step %q", part)
+		}
+		parsed, err := strconv.Atoi(stepText)
+		if err != nil || parsed <= 0 {
+			return nil, usageError("invalid step %q", part)
+		}
+		step = parsed
+	}
+
+	var start, end int
+	if base == "*" || base == "?" {
+		start = minValue
+		end = maxValue
+	} else if left, right, ok := strings.Cut(base, "-"); ok {
+		var err error
+		start, err = parseCronValue(left, minValue, maxValue, names)
+		if err != nil {
+			return nil, err
+		}
+		end, err = parseCronValue(right, minValue, maxValue, names)
+		if err != nil {
+			return nil, err
+		}
+		if normalizeSunday && start > end && isSundayCronValue(right) {
+			end = maxValue
+		}
+		if start > end {
+			return nil, usageError("range %q wraps around", base)
+		}
+	} else {
+		value, err := parseCronValue(base, minValue, maxValue, names)
+		if err != nil {
+			return nil, err
+		}
+		start = value
+		end = value
+		if hasStep {
+			end = maxValue
+		}
+	}
+
+	values := []int{}
+	for value := start; value <= end; value += step {
+		cronValue := value
+		if normalizeSunday && cronValue == 7 {
+			cronValue = 0
+		}
+		values = append(values, cronValue)
+	}
+	return values, nil
+}
+
+func isSundayCronValue(text string) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	return text == "sun" || text == "7"
+}
+
+func parseCronValue(text string, minValue, maxValue int, names map[string]int) (int, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return 0, usageError("empty value")
+	}
+	if names != nil {
+		if value, ok := names[strings.ToLower(text)]; ok {
+			return value, nil
+		}
+	}
+	value, err := strconv.Atoi(text)
+	if err != nil {
+		return 0, usageError("invalid value %q", text)
+	}
+	if value < minValue || value > maxValue {
+		return 0, usageError("value %q out of range %d-%d", text, minValue, maxValue)
+	}
+	return value, nil
+}
+
+func monthNames() map[string]int {
+	return map[string]int{
+		"jan": 1,
+		"feb": 2,
+		"mar": 3,
+		"apr": 4,
+		"may": 5,
+		"jun": 6,
+		"jul": 7,
+		"aug": 8,
+		"sep": 9,
+		"oct": 10,
+		"nov": 11,
+		"dec": 12,
+	}
+}
+
+func weekdayNames() map[string]int {
+	return map[string]int{
+		"sun": 0,
+		"mon": 1,
+		"tue": 2,
+		"wed": 3,
+		"thu": 4,
+		"fri": 5,
+		"sat": 6,
+	}
+}
+
+func buildCronIntervals(minute, hour, day, month, weekday cronField) ([]CalendarInterval, error) {
+	if !day.all && !weekday.all {
+		return nil, usageError("cron expressions that restrict both day-of-month and weekday are not supported")
+	}
+	dayWeek := dayWeekIntervals(day, weekday)
+	intervals := []CalendarInterval{}
+	for _, monthValue := range fieldValues(month) {
+		for _, dayWeekInterval := range dayWeek {
+			for _, hourValue := range fieldValues(hour) {
+				for _, minuteValue := range fieldValues(minute) {
+					interval := CalendarInterval{
+						Month:   intPtrFromCronValue(monthValue),
+						Day:     dayWeekInterval.Day,
+						Weekday: dayWeekInterval.Weekday,
+						Hour:    intPtrFromCronValue(hourValue),
+						Minute:  intPtrFromCronValue(minuteValue),
+					}
+					intervals = append(intervals, interval)
+					if len(intervals) > 4096 {
+						return nil, usageError("cron expression expands to too many launchd calendar intervals")
+					}
+				}
+			}
+		}
+	}
+	return intervals, nil
+}
+
+func dayWeekIntervals(day, weekday cronField) []CalendarInterval {
+	if day.all && weekday.all {
+		return []CalendarInterval{{}}
+	}
+	if !day.all && weekday.all {
+		intervals := make([]CalendarInterval, 0, len(day.values))
+		for _, dayValue := range day.values {
+			intervals = append(intervals, CalendarInterval{Day: ptrInt(dayValue)})
+		}
+		return intervals
+	}
+	if day.all && !weekday.all {
+		intervals := make([]CalendarInterval, 0, len(weekday.values))
+		for _, weekdayValue := range weekday.values {
+			intervals = append(intervals, CalendarInterval{Weekday: ptrInt(weekdayValue)})
+		}
+		return intervals
+	}
+
+	return nil
+}
+
+func fieldValues(field cronField) []int {
+	if field.all {
+		return []int{-1}
+	}
+	return field.values
+}
+
+func intPtrFromCronValue(value int) *int {
+	if value < 0 {
+		return nil
+	}
+	return ptrInt(value)
+}
+
+func ptrInt(value int) *int {
+	return &value
 }
 
 func parseTimes(s string) ([]TimeOfDay, error) {
@@ -539,6 +838,8 @@ func describeSchedule(s Schedule) string {
 			return fmt.Sprintf("every %s between %s (%s)", s.EveryOriginal, s.Between, strings.Join(parts, ","))
 		}
 		return "at " + strings.Join(parts, ",")
+	case "cron":
+		return "cron " + s.CronOriginal
 	default:
 		return s.Kind
 	}
@@ -598,15 +899,34 @@ func writeSchedule(buf *bytes.Buffer, s Schedule) {
 		return
 	}
 	buf.WriteString("  <key>StartCalendarInterval</key>\n  <array>\n")
-	for _, t := range s.Times {
-		buf.WriteString("    <dict>\n")
-		buf.WriteString("      <key>Hour</key>\n")
-		fmt.Fprintf(buf, "      <integer>%d</integer>\n", t.Hour)
-		buf.WriteString("      <key>Minute</key>\n")
-		fmt.Fprintf(buf, "      <integer>%d</integer>\n", t.Minute)
-		buf.WriteString("    </dict>\n")
+	if s.Kind == "cron" {
+		for _, interval := range s.CalendarIntervals {
+			writeCalendarInterval(buf, interval)
+		}
+	} else {
+		for _, t := range s.Times {
+			writeCalendarInterval(buf, CalendarInterval{Hour: ptrInt(t.Hour), Minute: ptrInt(t.Minute)})
+		}
 	}
 	buf.WriteString("  </array>\n")
+}
+
+func writeCalendarInterval(buf *bytes.Buffer, interval CalendarInterval) {
+	buf.WriteString("    <dict>\n")
+	writeOptionalIntKey(buf, "Month", interval.Month)
+	writeOptionalIntKey(buf, "Day", interval.Day)
+	writeOptionalIntKey(buf, "Weekday", interval.Weekday)
+	writeOptionalIntKey(buf, "Hour", interval.Hour)
+	writeOptionalIntKey(buf, "Minute", interval.Minute)
+	buf.WriteString("    </dict>\n")
+}
+
+func writeOptionalIntKey(buf *bytes.Buffer, key string, value *int) {
+	if value == nil {
+		return
+	}
+	fmt.Fprintf(buf, "      <key>%s</key>\n", key)
+	fmt.Fprintf(buf, "      <integer>%d</integer>\n", *value)
 }
 
 func writeKeyString(buf *bytes.Buffer, key, value string) {
