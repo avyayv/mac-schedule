@@ -60,13 +60,13 @@ jobs:
             gh release edit latest \
               --title "Latest main build" \
               --notes "Automated build from main at ${GITHUB_SHA}." \
-              --prerelease \
+              --prerelease=false \
               --latest
           else
             gh release create latest dist/* \
               --title "Latest main build" \
               --notes "Automated build from main at ${GITHUB_SHA}." \
-              --prerelease \
               --latest \
-              --target "$GITHUB_SHA"
+              --target "$GITHUB_SHA" \
+              --verify-tag
           fi
